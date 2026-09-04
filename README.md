@@ -9,7 +9,7 @@ Aplikasi skrining mandiri risiko judi online & jerat finansial digital untuk ASN
 - **JAGAD EDU** — modul literasi singkat seputar modus judi online, pinjol ilegal, dan keuangan sehat.
 - **JAGAD TREND** — grafik riwayat skor risiko pribadi dari waktu ke waktu.
 - **JAGAD CARE** — form konsultasi/pendampingan, bisa dikirim anonim.
-- **Admin Dashboard** — ringkasan agregat, distribusi risiko per OPD, daftar hasil skrining, dan manajemen permintaan JAGAD CARE.
+- **Admin Dashboard** — ringkasan agregat, distribusi risiko per OPD, tabel hasil skrining (bisa difilter nama & dicetak), manajemen permintaan JAGAD CARE, dan tombol kirim pengingat WhatsApp manual.
 
 ## Tumpukan Teknologi
 
@@ -37,6 +37,16 @@ Kredensial ini didapat dari **Supabase Dashboard → Project Settings → API**.
 2. Buka **SQL Editor**, tempel seluruh isi file `supabase/schema.sql`, lalu jalankan (RUN).
 3. Ini akan membuat tabel `profiles`, `check_records`, `edu_progress`, `care_requests` beserta Row Level Security-nya.
 
+### Wajib: matikan "Confirm email"
+
+Aplikasi ini memetakan NIK/NIP ke alamat pseudo-email (`asn.<NIK/NIP>@gresikkab.go.id`) karena Supabase Auth mengharuskan format email. Domain ini dipakai karena valid secara DNS, **namun bukan kotak surat sungguhan** — jadi konfirmasi lewat email tidak akan pernah bisa selesai jika dibiarkan aktif.
+
+1. Buka **Authentication → Providers/Sign In → Email** di dashboard Supabase.
+2. Matikan opsi **"Confirm email"** (Enable email confirmations).
+3. Simpan.
+
+Tanpa langkah ini, proses Register/Login akan gagal atau menggantung.
+
 ### Membuat akun admin pertama
 
 1. Jalankan aplikasi, daftar akun seperti biasa lewat halaman Register.
@@ -46,7 +56,56 @@ Kredensial ini didapat dari **Supabase Dashboard → Project Settings → API**.
    ```
 3. Login ulang — menu **Admin** akan muncul di navbar.
 
-## 3. Jalankan secara lokal
+## 3. Integrasi WhatsApp Business API (Pengingat Bulanan)
+
+Fitur ini mengirim pesan WhatsApp otomatis tiap bulan ke ASN yang **belum** mengisi JAGAD CHECK, memakai **WhatsApp Business Platform (Cloud API) resmi Meta**. Selain terjadwal otomatis, admin juga bisa memicu pengiriman **kapan saja secara manual** lewat tombol "Kirim Pengingat Sekarang" di tab Ringkasan pada Admin Dashboard — cocok untuk uji coba atau pengingat tambahan di luar jadwal bulanan.
+
+### 5.1 Siapkan akun Meta WhatsApp Business API
+
+1. Buat aplikasi di [developers.facebook.com](https://developers.facebook.com) → tambahkan produk **WhatsApp**.
+2. Di menu **WhatsApp → API Setup**, catat **Phone Number ID**.
+3. Buat **permanent access token**: buka **Meta Business Suite → System Users**, buat System User baru, beri akses ke aplikasi WhatsApp Anda, lalu generate token permanen (token sementara di halaman API Setup hanya berlaku 24 jam — tidak cocok untuk penjadwalan otomatis).
+4. Di menu **WhatsApp → Message Templates**, buat template baru, misalnya:
+   - Nama: `jagad_check_reminder`
+   - Kategori: **Utility**
+   - Bahasa: Indonesian
+   - Isi: `Yth {{1}}, Anda belum mengisi JAGAD CHECK bulan ini. Silakan isi melalui aplikasi JAGAD ASN untuk mendukung program pencegahan judi online di lingkungan ASN.`
+   - Ajukan untuk **review** — biasanya disetujui dalam beberapa menit sampai 1 hari.
+
+> **Catatan biaya:** Meta mengenakan biaya per percakapan (kategori Utility) yang bervariasi per negara. Pastikan cek [halaman harga WhatsApp Business Platform](https://developers.facebook.com/docs/whatsapp/pricing) sebelum mengaktifkan pengiriman massal.
+
+### 5.2 Deploy Edge Function
+
+1. Install [Supabase CLI](https://supabase.com/docs/guides/cli), lalu login: `supabase login`
+2. Hubungkan ke project: `supabase link --project-ref <PROJECT_REF>` (lihat PROJECT_REF di URL dashboard)
+3. Set secrets (kredensial Meta, disimpan aman di server, bukan di `.env` frontend):
+   ```bash
+   supabase secrets set WA_ACCESS_TOKEN=<permanent-access-token>
+   supabase secrets set WA_PHONE_NUMBER_ID=<phone-number-id>
+   supabase secrets set WA_TEMPLATE_NAME=jagad_check_reminder
+   supabase secrets set WA_TEMPLATE_LANG=id
+   ```
+4. Deploy function:
+   ```bash
+   supabase functions deploy send-wa-reminder
+   ```
+
+### 5.3 Jadwalkan otomatis tiap bulan
+
+1. Buka file `supabase/cron-wa-reminder.sql`, ganti `<PROJECT_REF>` dan `<SERVICE_ROLE_KEY>` (dari Project Settings → API) sesuai project Anda.
+2. Jalankan seluruh isinya di **SQL Editor** Supabase.
+3. Ini akan menjadwalkan pemanggilan Edge Function otomatis tiap tanggal 25 jam 08:00 WIB — bisa diubah lewat format cron di file tersebut.
+
+### 5.4 Uji coba manual (tanpa menunggu jadwal)
+
+Di dashboard Supabase → **Edge Functions** → `send-wa-reminder` → klik **Invoke**, atau lewat terminal:
+```bash
+curl -X POST https://<PROJECT_REF>.functions.supabase.co/send-wa-reminder \
+  -H "Authorization: Bearer <SERVICE_ROLE_KEY>"
+```
+Responsnya berupa JSON berisi daftar ASN yang belum mengisi bulan ini beserta status pengiriman WA ke masing-masing.
+
+## 4. Jalankan secara lokal
 
 ```bash
 npm run dev
@@ -54,7 +113,7 @@ npm run dev
 
 Buka `http://localhost:5173`.
 
-## 4. Deploy ke GitHub Pages
+## 5. Deploy ke GitHub Pages
 
 1. Push project ini ke repository GitHub (misal bernama `JAGAD-ASN`).
 2. Sesuaikan `base` di `vite.config.js` dengan nama repo Anda:
