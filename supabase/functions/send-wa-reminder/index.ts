@@ -1,7 +1,7 @@
-// Supabase Edge Function: send-wa-reminder
-// Dijalankan otomatis tiap bulan lewat pg_cron (lihat supabase/cron-wa-reminder.sql).
-// Mengirim pesan WhatsApp (Meta Cloud API) ke ASN yang BELUM mengisi JAGAD CHECK
-// pada bulan berjalan.
+// VERSI DEBUG SEMENTARA — send-wa-reminder
+// Tujuan: mencari tahu KENAPA jwt (dari cron) !== SERVICE_ROLE_KEY (dari env),
+// tanpa membocorkan key penuh ke response/log.
+// Setelah masalah ketemu, HAPUS blok debug ini dan kembalikan ke versi asli.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4'
 
@@ -19,6 +19,18 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
+// Helper: tampilkan info aman (panjang string + 6 karakter awal & akhir saja)
+function maskInfo(label: string, value: string | undefined) {
+  if (!value) return { label, exists: false }
+  return {
+    label,
+    exists: true,
+    length: value.length,
+    starts: value.slice(0, 6),
+    ends: value.slice(-6),
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
@@ -27,30 +39,54 @@ Deno.serve(async (req) => {
   try {
     const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY)
 
-    // --- Otorisasi: hanya boleh dipanggil oleh (a) pg_cron memakai service_role key,
-    // atau (b) pengguna yang login dan berperan admin. Ini mencegah user biasa
-    // memicu pengiriman WA massal ke seluruh ASN lewat tombol manual di Admin Dashboard.
     const authHeader = req.headers.get('Authorization') || ''
     const jwt = authHeader.replace('Bearer ', '').trim()
 
     let authorized = false
+    let authPath = 'none'
+
     if (jwt === SERVICE_ROLE_KEY) {
       authorized = true
+      authPath = 'service_role_exact_match'
     } else if (jwt) {
       const authClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
-      const { data: userData } = await authClient.auth.getUser(jwt)
+      const { data: userData, error: userErr } = await authClient.auth.getUser(jwt)
       if (userData?.user) {
         const { data: profile } = await supabase
           .from('profiles')
           .select('role')
           .eq('id', userData.user.id)
           .single()
-        if (profile?.role === 'admin') authorized = true
+        if (profile?.role === 'admin') {
+          authorized = true
+          authPath = 'admin_user_jwt'
+        } else {
+          authPath = `user_jwt_but_role=${profile?.role ?? 'unknown'}`
+        }
+      } else {
+        authPath = `not_a_valid_user_jwt (${userErr?.message ?? 'no user'})`
       }
     }
 
+    // --- DEBUG LOG: cek ini di Supabase Dashboard > Edge Functions > send-wa-reminder > Logs
+    console.log('DEBUG_AUTH', JSON.stringify({
+      authorized,
+      authPath,
+      incoming: maskInfo('incoming_jwt', jwt),
+      envServiceRole: maskInfo('env_SUPABASE_SERVICE_ROLE_KEY', SERVICE_ROLE_KEY),
+      envMatchesIncomingLength: jwt.length === SERVICE_ROLE_KEY?.length,
+    }))
+
     if (!authorized) {
-      return new Response(JSON.stringify({ error: 'Unauthorized: hanya admin yang boleh memicu pengiriman ini.' }), {
+      // --- DEBUG: sertakan info masked di response juga, supaya kelihatan tanpa buka Logs
+      return new Response(JSON.stringify({
+        error: 'Unauthorized: hanya admin yang boleh memicu pengiriman ini.',
+        debug: {
+          authPath,
+          incoming: maskInfo('incoming_jwt', jwt),
+          envServiceRole: maskInfo('env_SUPABASE_SERVICE_ROLE_KEY', SERVICE_ROLE_KEY),
+        },
+      }), {
         status: 401,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       })
@@ -59,7 +95,6 @@ Deno.serve(async (req) => {
     const now = new Date()
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
 
-    // Semua ASN yang punya nomor WA terdaftar
     const { data: profiles, error: profileErr } = await supabase
       .from('profiles')
       .select('id, nama, no_wa')
@@ -67,7 +102,6 @@ Deno.serve(async (req) => {
 
     if (profileErr) throw profileErr
 
-    // ID pengguna yang SUDAH mengisi JAGAD CHECK bulan ini
     const { data: sudahIsi, error: checkErr } = await supabase
       .from('check_records')
       .select('user_id')
@@ -111,7 +145,7 @@ Deno.serve(async (req) => {
     }
 
     return new Response(
-      JSON.stringify({ total_belum_isi: belumIsi.length, hasil }),
+      JSON.stringify({ total_belum_isi: belumIsi.length, hasil, authPath }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     )
   } catch (err) {
